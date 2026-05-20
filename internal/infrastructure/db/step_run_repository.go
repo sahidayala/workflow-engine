@@ -6,24 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/SheykoWk/workflow-engine/internal/app/ports"
 )
 
-// PendingStepRun is the next step the executor should run (pending, eligible by order).
-type PendingStepRun struct {
-	ID             string
-	WorkflowRunID  string
-	WorkflowStepID string
-	StepIndex      int
-	Attempt        int
-	StepType       string
-	Config         []byte
-}
-
-// StepIndexOutput is stored JSON output for a succeeded step (workflow_steps.step_index).
-type StepIndexOutput struct {
-	StepIndex int
-	Output    []byte // JSON object; never nil from the repository
-}
+// Compile-time contract: StepRunRepository must satisfy ports.StepRunRepository.
+var _ ports.StepRunRepository = (*StepRunRepository)(nil)
 
 // StepRunRepository updates step_runs for the in-process executor.
 type StepRunRepository struct {
@@ -41,11 +29,12 @@ func NewStepRunRepository(db *sql.DB) *StepRunRepository {
 // - next_run_at is null or not in the future (backoff elapsed)
 // - global order: oldest step_run first among eligible rows
 // Returns (nil, nil) when there is no work.
-func (r *StepRunRepository) GetNextPendingStepRun(ctx context.Context) (*PendingStepRun, error) {
+func (r *StepRunRepository) GetNextPendingStepRun(ctx context.Context) (*ports.PendingStepRun, error) {
 	const q = `
 		SELECT
 			sr.id,
 			sr.workflow_run_id,
+			ws.workflow_id,
 			sr.workflow_step_id,
 			ws.step_index,
 			sr.attempt,
@@ -72,10 +61,11 @@ func (r *StepRunRepository) GetNextPendingStepRun(ctx context.Context) (*Pending
 		ORDER BY sr.created_at ASC
 		LIMIT 1
 	`
-	var p PendingStepRun
+	var p ports.PendingStepRun
 	err := r.db.QueryRowContext(ctx, q).Scan(
 		&p.ID,
 		&p.WorkflowRunID,
+		&p.WorkflowID,
 		&p.WorkflowStepID,
 		&p.StepIndex,
 		&p.Attempt,
@@ -93,7 +83,7 @@ func (r *StepRunRepository) GetNextPendingStepRun(ctx context.Context) (*Pending
 
 // GetPreviousStepOutputs returns succeeded step outputs for a workflow run (for config templating).
 // Each row is keyed by workflow_steps.step_index; output is JSON (at least {}).
-func (r *StepRunRepository) GetPreviousStepOutputs(ctx context.Context, workflowRunID string) ([]StepIndexOutput, error) {
+func (r *StepRunRepository) GetPreviousStepOutputs(ctx context.Context, workflowRunID string) ([]ports.StepIndexOutput, error) {
 	const q = `
 		SELECT ws.step_index, COALESCE(sr.output, '{}'::jsonb)
 		FROM step_runs sr
@@ -108,9 +98,9 @@ func (r *StepRunRepository) GetPreviousStepOutputs(ctx context.Context, workflow
 	}
 	defer rows.Close()
 
-	var list []StepIndexOutput
+	var list []ports.StepIndexOutput
 	for rows.Next() {
-		var o StepIndexOutput
+		var o ports.StepIndexOutput
 		if err := rows.Scan(&o.StepIndex, &o.Output); err != nil {
 			return nil, fmt.Errorf("step_run_repository: scan step output: %w", err)
 		}
@@ -321,4 +311,27 @@ func (r *StepRunRepository) MarkWorkflowRunFailed(ctx context.Context, workflowR
 		return fmt.Errorf("step_run_repository: mark workflow run failed: not pending or running")
 	}
 	return nil
+}
+
+// GetProjectContext returns the project_id and external_tenant_id (may be empty) for the
+// project that owns the given workflow run. Used by the executor to enrich lifecycle events.
+func (r *StepRunRepository) GetProjectContext(ctx context.Context, workflowRunID string) (projectID, externalTenantID string, err error) {
+	const q = `
+		SELECT p.id, COALESCE(p.external_tenant_id, '')
+		FROM workflow_runs wr
+		JOIN workflows w ON w.id = wr.workflow_id
+		JOIN projects p  ON p.id = w.project_id
+		WHERE wr.id = $1
+	`
+	var extTenant sql.NullString
+	if scanErr := r.db.QueryRowContext(ctx, q, workflowRunID).Scan(&projectID, &extTenant); scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("step_run_repository: get project context: %w", scanErr)
+	}
+	if extTenant.Valid {
+		externalTenantID = extTenant.String
+	}
+	return projectID, externalTenantID, nil
 }

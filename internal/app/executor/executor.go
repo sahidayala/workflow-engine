@@ -4,36 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"time"
 
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
+	"github.com/SheykoWk/workflow-engine/internal/app/ports"
 )
-
-// StepRunRepository is the persistence surface required by the executor.
-type StepRunRepository interface {
-	GetNextPendingStepRun(ctx context.Context) (*db.PendingStepRun, error)
-	GetPreviousStepOutputs(ctx context.Context, workflowRunID string) ([]db.StepIndexOutput, error)
-	IsWorkflowRunPending(ctx context.Context, workflowRunID string) (bool, error)
-	WorkflowRunStepCounts(ctx context.Context, workflowRunID string) (total int, succeeded int, err error)
-	MarkStepRunRunning(ctx context.Context, id string) error
-	MarkStepRunSucceeded(ctx context.Context, id string, outputJSON []byte) error
-	MarkStepRunFailed(ctx context.Context, id string, outputJSON []byte) error
-	MarkWorkflowRunRunning(ctx context.Context, workflowRunID string) error
-	MarkWorkflowRunSucceeded(ctx context.Context, workflowRunID string) error
-	MarkWorkflowRunFailed(ctx context.Context, workflowRunID string) error
-	RetryStepRun(ctx context.Context, id string, nextRunAt time.Time, attempt int) error
-}
 
 const pollInterval = 1 * time.Second
 
 // Start runs the executor loop in a new goroutine until ctx is cancelled.
-func Start(ctx context.Context, repo StepRunRepository) {
-	go runLoop(ctx, repo)
+// publisher is optional — pass nil to disable event publishing.
+func Start(ctx context.Context, repo ports.StepRunRepository, publisher ports.EventPublisher, log *slog.Logger) {
+	go runLoop(ctx, repo, publisher, log)
 }
 
-func runLoop(ctx context.Context, repo StepRunRepository) {
+func runLoop(ctx context.Context, repo ports.StepRunRepository, publisher ports.EventPublisher, logger *slog.Logger) {
 	for {
-		processOne(ctx, repo)
+		processOne(ctx, repo, publisher, logger)
 		select {
 		case <-ctx.Done():
 			return
@@ -42,7 +29,7 @@ func runLoop(ctx context.Context, repo StepRunRepository) {
 	}
 }
 
-func processOne(ctx context.Context, repo StepRunRepository) {
+func processOne(ctx context.Context, repo ports.StepRunRepository, publisher ports.EventPublisher, logger *slog.Logger) {
 	next, err := repo.GetNextPendingStepRun(ctx)
 	if err != nil {
 		log.Printf("executor: get next pending: %v", err)
@@ -53,6 +40,12 @@ func processOne(ctx context.Context, repo StepRunRepository) {
 	}
 
 	persist := context.Background()
+
+	projectID, externalTenantID, err := repo.GetProjectContext(persist, next.WorkflowRunID)
+	if err != nil {
+		log.Printf("executor: get project context %s: %v", next.WorkflowRunID, err)
+		// Non-fatal: proceed without tenant context
+	}
 
 	runPending, err := repo.IsWorkflowRunPending(ctx, next.WorkflowRunID)
 	if err != nil {
@@ -78,11 +71,35 @@ func processOne(ctx context.Context, repo StepRunRepository) {
 		log.Printf("executor: mark running %s: %v", next.ID, err)
 		return
 	}
+	publishEvent(ctx, publisher, ports.WorkflowEvent{
+		Type:             ports.StepRunStarted,
+		ProjectID:        projectID,
+		ExternalTenantID: externalTenantID,
+		RunID:            next.WorkflowRunID,
+		WorkflowID:       next.WorkflowID,
+		StepRunID:        next.ID,
+		StepIndex:        next.StepIndex,
+		OccurredAt:       time.Now().UTC(),
+		Payload: map[string]any{
+			"step_type": next.StepType,
+			"attempt":   next.Attempt,
+		},
+	}, logger)
 
 	if firstStep {
 		if err := repo.MarkWorkflowRunRunning(persist, next.WorkflowRunID); err != nil {
 			log.Printf("executor: mark workflow run running %s: %v", next.WorkflowRunID, err)
 		}
+		publishEvent(persist, publisher, ports.WorkflowEvent{
+			Type:             ports.WorkflowRunStarted,
+			ProjectID:        projectID,
+			ExternalTenantID: externalTenantID,
+			RunID:            next.WorkflowRunID,
+			WorkflowID:       next.WorkflowID,
+			StepIndex:        -1,
+			OccurredAt:       time.Now().UTC(),
+			Payload:          map[string]any{},
+		}, logger)
 	}
 
 	out, err := executeStep(ctx, &stepToRun)
@@ -100,9 +117,31 @@ func processOne(ctx context.Context, repo StepRunRepository) {
 		if err := repo.MarkStepRunFailed(persist, next.ID, out); err != nil {
 			log.Printf("executor: mark failed %s: %v", next.ID, err)
 		}
+		publishEvent(persist, publisher, ports.WorkflowEvent{
+			Type:             ports.StepRunFailed,
+			ProjectID:        projectID,
+			ExternalTenantID: externalTenantID,
+			RunID:            next.WorkflowRunID,
+			WorkflowID:       next.WorkflowID,
+			StepRunID:        next.ID,
+			StepIndex:        next.StepIndex,
+			OccurredAt:       time.Now().UTC(),
+			Payload:          map[string]any{"error": err.Error(), "step_type": next.StepType},
+		}, logger)
+
 		if err := repo.MarkWorkflowRunFailed(persist, next.WorkflowRunID); err != nil {
 			log.Printf("executor: mark workflow run failed %s: %v", next.WorkflowRunID, err)
 		}
+		publishEvent(persist, publisher, ports.WorkflowEvent{
+			Type:             ports.WorkflowRunFailed,
+			ProjectID:        projectID,
+			ExternalTenantID: externalTenantID,
+			RunID:            next.WorkflowRunID,
+			WorkflowID:       next.WorkflowID,
+			StepIndex:        -1,
+			OccurredAt:       time.Now().UTC(),
+			Payload:          map[string]any{"failed_step_run_id": next.ID},
+		}, logger)
 		return
 	}
 
@@ -110,6 +149,17 @@ func processOne(ctx context.Context, repo StepRunRepository) {
 		log.Printf("executor: mark succeeded %s: %v", next.ID, err)
 		return
 	}
+	publishEvent(persist, publisher, ports.WorkflowEvent{
+		Type:             ports.StepRunSucceeded,
+		ProjectID:        projectID,
+		ExternalTenantID: externalTenantID,
+		RunID:            next.WorkflowRunID,
+		WorkflowID:       next.WorkflowID,
+		StepRunID:        next.ID,
+		StepIndex:        next.StepIndex,
+		OccurredAt:       time.Now().UTC(),
+		Payload:          map[string]any{"step_type": next.StepType},
+	}, logger)
 
 	total, succeededAfter, err := repo.WorkflowRunStepCounts(persist, next.WorkflowRunID)
 	if err != nil {
@@ -120,10 +170,40 @@ func processOne(ctx context.Context, repo StepRunRepository) {
 		if err := repo.MarkWorkflowRunSucceeded(persist, next.WorkflowRunID); err != nil {
 			log.Printf("executor: mark workflow run succeeded %s: %v", next.WorkflowRunID, err)
 		}
+		publishEvent(persist, publisher, ports.WorkflowEvent{
+			Type:             ports.WorkflowRunCompleted,
+			ProjectID:        projectID,
+			ExternalTenantID: externalTenantID,
+			RunID:            next.WorkflowRunID,
+			WorkflowID:       next.WorkflowID,
+			StepIndex:        -1,
+			OccurredAt:       time.Now().UTC(),
+			Payload:          map[string]any{"total_steps": total},
+		}, logger)
 	}
 }
 
-func executeStep(ctx context.Context, step *db.PendingStepRun) (output []byte, err error) {
+// publishEvent publishes a workflow lifecycle event best-effort.
+// Failures are logged and never propagate — the executor must not fail because
+// the event backbone is temporarily unavailable.
+func publishEvent(ctx context.Context, publisher ports.EventPublisher, event ports.WorkflowEvent, logger *slog.Logger) {
+	if publisher == nil {
+		return
+	}
+	if err := publisher.Publish(ctx, event); err != nil {
+		if logger != nil {
+			logger.Warn("executor: publish event failed (best-effort, continuing)",
+				"event_type", event.Type,
+				"run_id", event.RunID,
+				"error", err,
+			)
+		} else {
+			log.Printf("executor: publish event %s failed: %v", event.Type, err)
+		}
+	}
+}
+
+func executeStep(ctx context.Context, step *ports.PendingStepRun) (output []byte, err error) {
 	switch step.StepType {
 	case "delay":
 		return nil, runDelay(ctx, step.Config)

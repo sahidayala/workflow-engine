@@ -7,14 +7,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
+	"github.com/SheykoWk/workflow-engine/internal/app/ports"
 )
 
 // Matches {{steps.<n>.output.<dotted.path>}} — path is resolved inside that step's output JSON.
 var stepOutputPlaceholderRE = regexp.MustCompile(`\{\{steps\.(\d+)\.output\.([^}]+)\}\}`)
 
 // interpolateStepConfig replaces placeholders using outputs from steps with step_index < currentStepIndex.
-func interpolateStepConfig(config []byte, rows []db.StepIndexOutput, currentStepIndex int) ([]byte, error) {
+func interpolateStepConfig(config []byte, rows []ports.StepIndexOutput, currentStepIndex int) ([]byte, error) {
 	if len(config) == 0 {
 		return config, nil
 	}
