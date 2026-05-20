@@ -4,12 +4,15 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/SheykoWk/workflow-engine/internal/app/executor"
+	"github.com/SheykoWk/workflow-engine/internal/app/ports"
 	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
+	"github.com/SheykoWk/workflow-engine/internal/infrastructure/eventstore"
 	"github.com/joho/godotenv"
 )
 
@@ -19,6 +22,8 @@ func main() {
 			log.Fatalf("load .env: %v", err)
 		}
 	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -31,11 +36,17 @@ func main() {
 	}
 	defer func() { _ = sqlDB.Close() }()
 
+	var publisher ports.EventPublisher
+	if esURL := os.Getenv("EVENT_STREAMING_BASE_URL"); esURL != "" {
+		publisher = eventstore.NewHTTPClient(esURL, os.Getenv("EVENT_STREAMING_API_TOKEN"), logger)
+		logger.Info("event publishing enabled", "url", esURL)
+	}
+
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 
 	stepRunRepo := db.NewStepRunRepository(sqlDB)
-	executor.Start(ctx, stepRunRepo)
+	executor.Start(ctx, stepRunRepo, publisher, logger)
 	log.Printf("workflow worker started")
 
 	quit := make(chan os.Signal, 1)

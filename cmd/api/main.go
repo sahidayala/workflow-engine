@@ -23,15 +23,20 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/SheykoWk/workflow-engine/internal/app"
 	"github.com/SheykoWk/workflow-engine/internal/app/executor"
+	"github.com/SheykoWk/workflow-engine/internal/app/ports"
 	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
+	"github.com/SheykoWk/workflow-engine/internal/infrastructure/eventstore"
+	kafkainfra "github.com/SheykoWk/workflow-engine/internal/infrastructure/kafka"
 	httpapi "github.com/SheykoWk/workflow-engine/internal/interfaces/http"
 	"github.com/joho/godotenv"
 
@@ -39,13 +44,13 @@ import (
 )
 
 func main() {
-	// Go only reads the process environment (os.Getenv). A .env file is not loaded
-	// automatically; godotenv copies its KEY=value pairs into the environment.
 	if _, err := os.Stat(".env"); err == nil {
 		if err := godotenv.Load(); err != nil {
 			log.Fatalf("load .env: %v", err)
 		}
 	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -63,19 +68,45 @@ func main() {
 	projectRepo := db.NewProjectRepository(sqlDB)
 	apiKeyRepo := db.NewAPIKeyRepository(sqlDB)
 	stepRunRepo := db.NewStepRunRepository(sqlDB)
+	triggerRepo := db.NewEventTriggerRepository(sqlDB)
 	workflows := httpapi.NewWorkflowHandler(workflowSvc)
 	projects := httpapi.NewProjectHandler(projectRepo)
 
-	executorCtx, stopExecutor := context.WithCancel(context.Background())
-	defer stopExecutor()
-	executor.Start(executorCtx, stepRunRepo)
-	log.Printf("executor: started")
-
-	addr := ":8080"
-	if v := os.Getenv("HTTP_ADDR"); v != "" {
-		addr = v
+	// Optional: Event Streaming backbone integration.
+	var publisher ports.EventPublisher
+	if esURL := os.Getenv("EVENT_STREAMING_BASE_URL"); esURL != "" {
+		publisher = eventstore.NewHTTPClient(esURL, os.Getenv("EVENT_STREAMING_API_TOKEN"), logger)
+		logger.Info("event publishing enabled", "url", esURL)
 	}
 
+	executorCtx, stopExecutor := context.WithCancel(context.Background())
+	defer stopExecutor()
+	executor.Start(executorCtx, stepRunRepo, publisher, logger)
+	log.Printf("executor: started")
+
+	// Optional: Kafka consumer for event-driven workflow triggers.
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	kafkaTopic := os.Getenv("KAFKA_EVENTS_TOPIC")
+	if kafkaBrokers != "" && kafkaTopic != "" {
+		triggerSvc := app.NewEventTriggerService(triggerRepo, workflowRepo, logger)
+		consumer := kafkainfra.NewConsumer(kafkainfra.Config{
+			Brokers: strings.Split(kafkaBrokers, ","),
+			Topic:   kafkaTopic,
+			GroupID: envOrDefault("KAFKA_CONSUMER_GROUP", "workflow-engine"),
+		}, triggerSvc.Handle, logger)
+
+		consumerCtx, stopConsumer := context.WithCancel(context.Background())
+		defer stopConsumer()
+		go func() {
+			logger.Info("kafka consumer started", "topic", kafkaTopic, "brokers", kafkaBrokers)
+			if err := consumer.Run(consumerCtx); err != nil {
+				logger.Error("kafka consumer exited with error", "error", err)
+			}
+			_ = consumer.Close()
+		}()
+	}
+
+	addr := envOrDefault("HTTP_ADDR", ":8080")
 	handler := httpapi.NewRouter(apiKeyRepo, workflows, projects)
 	srv := &http.Server{
 		Addr:    addr,
@@ -100,4 +131,11 @@ func main() {
 		log.Printf("server shutdown: %v", err)
 	}
 	log.Printf("server stopped")
+}
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
