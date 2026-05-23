@@ -69,6 +69,7 @@ func main() {
 	apiKeyRepo := db.NewAPIKeyRepository(sqlDB)
 	stepRunRepo := db.NewStepRunRepository(sqlDB)
 	triggerRepo := db.NewEventTriggerRepository(sqlDB)
+	processedEventRepo := db.NewProcessedEventRepository(sqlDB)
 	workflows := httpapi.NewWorkflowHandler(workflowSvc)
 	projects := httpapi.NewProjectHandler(projectRepo)
 
@@ -82,13 +83,13 @@ func main() {
 	executorCtx, stopExecutor := context.WithCancel(context.Background())
 	defer stopExecutor()
 	executor.Start(executorCtx, stepRunRepo, publisher, logger)
-	log.Printf("executor: started")
+	logger.Info("executor: started")
 
 	// Optional: Kafka consumer for event-driven workflow triggers.
 	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
 	kafkaTopic := os.Getenv("KAFKA_EVENTS_TOPIC")
 	if kafkaBrokers != "" && kafkaTopic != "" {
-		triggerSvc := app.NewEventTriggerService(triggerRepo, workflowRepo, logger)
+		triggerSvc := app.NewEventTriggerService(triggerRepo, workflowRepo, processedEventRepo, logger)
 		consumer := kafkainfra.NewConsumer(kafkainfra.Config{
 			Brokers: strings.Split(kafkaBrokers, ","),
 			Topic:   kafkaTopic,

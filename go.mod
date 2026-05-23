@@ -5,6 +5,7 @@ go 1.26.1
 require (
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/joho/godotenv v1.5.1
+	github.com/segmentio/kafka-go v0.4.47
 	github.com/swaggo/http-swagger v1.3.4
 	github.com/swaggo/swag v1.16.6
 	golang.org/x/crypto v0.49.0
@@ -24,7 +25,6 @@ require (
 	github.com/mailru/easyjson v0.7.6 // indirect
 	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
-	github.com/segmentio/kafka-go v0.4.47 // indirect
 	github.com/swaggo/files v1.0.1 // indirect
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
