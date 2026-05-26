@@ -25,6 +25,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"math/rand/v2"
+	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
 
@@ -33,13 +36,22 @@ import (
 )
 
 // maxHandlerRetries is the number of in-memory retry attempts before a message
-// is dead-lettered. Set low (3) to bound partition stall time without completely
-// ignoring transient errors (DB blip, network timeout).
-//
-// Each attempt is immediate (no sleep) because the error may be transient and
-// adding sleep here would also delay all subsequent messages in the partition.
-// If a more sophisticated backoff is needed, extract the retry loop to a goroutine.
-const maxHandlerRetries = 3
+// is dead-lettered. 5 attempts with exponential backoff gives a total retry
+// window of ~3.1s, which covers most transient DB and network errors.
+const maxHandlerRetries = 5
+
+// handlerRetryDelay returns the wait time before attempt number `attempt` (1-based).
+// Base is 100ms, doubles each attempt, capped at 2s, with ±20% jitter.
+// Total window for 5 attempts: ~100+200+400+800+1600ms ≈ 3.1s.
+func handlerRetryDelay(attempt int) time.Duration {
+	base := 100.0 // ms
+	delay := base * math.Pow(2, float64(attempt-1))
+	if delay > 2000 {
+		delay = 2000
+	}
+	jitter := 0.8 + rand.Float64()*0.4 // uniform [0.8, 1.2]
+	return time.Duration(delay*jitter) * time.Millisecond
+}
 
 // Handler processes a single integration event. Return a non-nil error to
 // signal that the event should be retried (up to maxHandlerRetries).
@@ -142,9 +154,10 @@ func (c *Consumer) Run(ctx context.Context) error {
 			correlationID = msgCorrelationID
 		}
 
-		// Attempt the handler up to maxHandlerRetries times. Each attempt is
-		// immediate — backoff is the responsibility of the handler (e.g. a DB
-		// connection error already carries its own retry logic at the driver level).
+		// Attempt the handler up to maxHandlerRetries times with exponential backoff.
+		// Backoff covers transient errors (DB connection pool exhaustion, network blips)
+		// that typically resolve within 100ms-2s. Without backoff, all 3 retries fire
+		// in <10ms and the event is dead-lettered before the error even clears.
 		var handlerErr error
 		for attempt := 1; attempt <= maxHandlerRetries; attempt++ {
 			handlerErr = c.handler(msgCtx, &event)
@@ -165,6 +178,13 @@ func (c *Consumer) Run(ctx context.Context) error {
 				"max_attempts", maxHandlerRetries,
 				"error", handlerErr,
 			)
+			if attempt < maxHandlerRetries {
+				select {
+				case <-time.After(handlerRetryDelay(attempt)):
+				case <-msgCtx.Done():
+					return msgCtx.Err()
+				}
+			}
 		}
 
 		if handlerErr != nil {
