@@ -28,6 +28,12 @@ func NewStepRunRepository(db *sql.DB) *StepRunRepository {
 // - every step with a lower step_index in that run has status succeeded
 // - next_run_at is null or not in the future (backoff elapsed)
 // - global order: oldest step_run first among eligible rows
+//
+// FOR UPDATE OF sr SKIP LOCKED prevents concurrent executor instances from
+// racing on the same row. Any row already locked by another transaction is
+// skipped, so each executor claims a distinct step. The lock is held for the
+// duration of the QueryRowContext call; MarkStepRunRunning provides the
+// definitive atomic status check (double-check locking pattern).
 // Returns (nil, nil) when there is no work.
 func (r *StepRunRepository) GetNextPendingStepRun(ctx context.Context) (*ports.PendingStepRun, error) {
 	const q = `
@@ -60,6 +66,7 @@ func (r *StepRunRepository) GetNextPendingStepRun(ctx context.Context) (*ports.P
 		)
 		ORDER BY sr.created_at ASC
 		LIMIT 1
+		FOR UPDATE OF sr SKIP LOCKED
 	`
 	var p ports.PendingStepRun
 	err := r.db.QueryRowContext(ctx, q).Scan(

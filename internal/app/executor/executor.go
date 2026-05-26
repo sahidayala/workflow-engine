@@ -2,22 +2,27 @@ package executor
 
 import (
 	"context"
-	"crypto/rand"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/SheykoWk/workflow-engine/internal/app/ports"
 )
 
-const pollInterval = 1 * time.Second
+const (
+	pollIntervalBase = 1 * time.Second
+	pollJitter       = 500 * time.Millisecond // ±500ms to stagger concurrent executor instances
+	pollBackoffMax   = 30 * time.Second       // back off when no work is found
+)
 
 // newEventID returns a random UUID v4 string for use as a lifecycle event ID.
 // Uses crypto/rand so IDs are unpredictable and safe to expose externally.
 func newEventID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	if _, err := cryptorand.Read(b[:]); err != nil {
 		// Fallback should never happen on a healthy OS; use time-based ID.
 		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
 	}
@@ -34,26 +39,50 @@ func Start(ctx context.Context, repo ports.StepRunRepository, publisher ports.Ev
 }
 
 func runLoop(ctx context.Context, repo ports.StepRunRepository, publisher ports.EventPublisher, logger *slog.Logger) {
+	// idleBackoff tracks how long to wait when no work was found.
+	// Reset to base on any successful claim; doubles up to pollBackoffMax on empty polls.
+	// Jitter prevents the thundering-herd problem when multiple executor instances run in parallel.
+	idleDelay := pollIntervalBase
 	for {
-		processOne(ctx, repo, publisher, logger)
+		found := processOne(ctx, repo, publisher, logger)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(pollInterval):
+		case <-time.After(nextPollDelay(found, &idleDelay)):
 		}
 	}
 }
 
-func processOne(ctx context.Context, repo ports.StepRunRepository, publisher ports.EventPublisher, logger *slog.Logger) {
+// nextPollDelay returns the wait before the next poll.
+// When work was found: reset backoff and add a small jitter.
+// When no work was found: double the backoff (capped at pollBackoffMax) + jitter.
+func nextPollDelay(workFound bool, idleDelay *time.Duration) time.Duration {
+	if workFound {
+		*idleDelay = pollIntervalBase
+	} else {
+		next := time.Duration(float64(*idleDelay) * 1.5)
+		if next > pollBackoffMax {
+			next = pollBackoffMax
+		}
+		*idleDelay = next
+	}
+	// Add uniform jitter in [0, pollJitter] to stagger concurrent instances.
+	jitter := time.Duration(mathrand.Int64N(int64(pollJitter)))
+	return *idleDelay + jitter
+}
+
+// processOne claims and executes one pending step. Returns true when a step was
+// found (so the caller can reset the idle backoff), false when the queue is empty.
+func processOne(ctx context.Context, repo ports.StepRunRepository, publisher ports.EventPublisher, logger *slog.Logger) bool {
 	next, err := repo.GetNextPendingStepRun(ctx)
 	if err != nil {
 		logger.Error("executor: get next pending step run",
 			"error", err,
 		)
-		return
+		return false
 	}
 	if next == nil {
-		return
+		return false
 	}
 
 	persist := context.Background()
@@ -74,7 +103,7 @@ func processOne(ctx context.Context, repo ports.StepRunRepository, publisher por
 			"workflow_run_id", next.WorkflowRunID,
 			"error", err,
 		)
-		return
+		return true
 	}
 	firstStep := runPending
 
@@ -84,7 +113,7 @@ func processOne(ctx context.Context, repo ports.StepRunRepository, publisher por
 			"workflow_run_id", next.WorkflowRunID,
 			"error", err,
 		)
-		return
+		return true
 	}
 	resolvedConfig, err := interpolateStepConfig(next.Config, prevOuts, next.StepIndex)
 	if err != nil {
@@ -93,7 +122,7 @@ func processOne(ctx context.Context, repo ports.StepRunRepository, publisher por
 			"step_index", next.StepIndex,
 			"error", err,
 		)
-		return
+		return true
 	}
 	stepToRun := *next
 	stepToRun.Config = resolvedConfig
@@ -103,7 +132,7 @@ func processOne(ctx context.Context, repo ports.StepRunRepository, publisher por
 			"step_run_id", next.ID,
 			"error", err,
 		)
-		return
+		return true
 	}
 	publishEvent(ctx, publisher, ports.WorkflowEvent{
 		EventID:          newEventID(),
@@ -172,7 +201,7 @@ func processOne(ctx context.Context, repo ports.StepRunRepository, publisher por
 					"retry_delay", delay,
 				)
 			}
-			return
+			return true
 		}
 		if err := repo.MarkStepRunFailed(persist, next.ID, out); err != nil {
 			logger.Error("executor: mark step run failed",
@@ -214,7 +243,7 @@ func processOne(ctx context.Context, repo ports.StepRunRepository, publisher por
 			OccurredAt:       time.Now().UTC(),
 			Payload:          map[string]any{"failed_step_run_id": next.ID},
 		}, logger)
-		return
+		return true
 	}
 
 	if err := repo.MarkStepRunSucceeded(persist, next.ID, out); err != nil {
@@ -222,7 +251,7 @@ func processOne(ctx context.Context, repo ports.StepRunRepository, publisher por
 			"step_run_id", next.ID,
 			"error", err,
 		)
-		return
+		return true
 	}
 	publishEvent(persist, publisher, ports.WorkflowEvent{
 		EventID:          newEventID(),
@@ -245,7 +274,7 @@ func processOne(ctx context.Context, repo ports.StepRunRepository, publisher por
 			"workflow_run_id", next.WorkflowRunID,
 			"error", err,
 		)
-		return
+		return true
 	}
 	if total > 0 && succeededAfter == total {
 		if err := repo.MarkWorkflowRunSucceeded(persist, next.WorkflowRunID); err != nil {
@@ -268,6 +297,7 @@ func processOne(ctx context.Context, repo ports.StepRunRepository, publisher por
 			Payload:          map[string]any{"total_steps": total},
 		}, logger)
 	}
+	return true
 }
 
 // publishEvent publishes a workflow lifecycle event best-effort.
