@@ -175,6 +175,9 @@ Located in `internal/infrastructure/db/migrations/`. Paired `.up.sql` / `.down.s
 | 000004 | Unique index on `api_keys.key_prefix` |
 | 000005 | `step_runs.next_run_at` (retry backoff scheduling) |
 | 000006 | `step_runs.output` baseline (safe re-run) |
+| 000007 | `projects.external_tenant_id` (Kafka trigger tenant mapping) |
+| 000008 | `event_triggers` (event-type → workflow mapping) |
+| 000009 | `processed_integration_events` (Kafka idempotency guard) |
 
 ---
 
