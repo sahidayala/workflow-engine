@@ -1,318 +1,338 @@
-# Distributed Workflow Orchestration Engine
+# Workflow Engine
 
-A self-hosted distributed workflow orchestration engine built in Go for executing long-running, fault-tolerant multi-step processes with durable state persistence, retry semantics, exponential backoff, and inter-step output chaining.
+A self-hosted, PostgreSQL-backed workflow orchestration engine for executing
+durable multi-step processes with automatic retries, exponential backoff, and
+inter-step output chaining.
 
-Inspired by Temporal and AWS Step Functions — designed as a lightweight, infrastructure-minimal alternative that can run with only PostgreSQL.
+[![CI](https://github.com/SheykoWk/workflow-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/SheykoWk/workflow-engine/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/badge/go-1.25-blue)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
 ## Why This Exists
 
-Modern distributed systems frequently require orchestration of multi-step workflows such as:
+Modern distributed systems need multi-step workflow orchestration — payment
+pipelines, onboarding flows, integration retries, approval chains. Teams
+typically solve this inside application code, which leads to duplicated retry
+logic, inconsistent failure recovery, and no centralised visibility.
 
-- payment processing pipelines
-- onboarding automations
-- asynchronous SaaS provisioning
-- multi-service approval chains
-- retryable integration workflows
-
-Most teams solve this repeatedly inside application code, creating:
-
-- duplicated retry logic
-- fragile failure recovery
-- inconsistent orchestration behavior
-- no centralized execution visibility
-
-This engine solves that problem by providing a reusable orchestration layer.
+This engine provides a reusable orchestration layer that requires only
+**PostgreSQL** — no Redis, no message broker required for the core path.
 
 ---
 
-## Core Capabilities
+## Key Features
 
-### Durable Workflow Execution
-Workflow state is persisted in PostgreSQL and survives crashes or restarts.
-
-### Retry with Exponential Backoff + Jitter
-Automatic retry handling with:
-- exponential backoff
-- ±20% jitter
-- capped retry windows
-
-### Multi-Step Dependency Sequencing
-Steps execute only when all prior dependencies succeed.
-
-### Multi-Tenant Isolation
-Every workflow, run, and API request is tenant-scoped.
-
-### Inter-Step Output Chaining
-Downstream steps can dynamically consume outputs from previous steps:
-
-```json
-{
-  "url": "{{steps.1.output.data.url}}"
-}
-````
-
-### Idempotent Execution Guarantees
-
-Duplicate step attempts prevented via DB-level unique constraints.
-
-### Distributed Worker Architecture
-
-Worker processes run independently from API server.
+- **Durable state** — workflow and step state is persisted in PostgreSQL and
+  survives crashes or restarts.
+- **Retry with exponential backoff** — per-step retry policy with configurable
+  max attempts, base backoff, and ±20 % jitter; capped at 24 h.
+- **Inter-step output chaining** — downstream steps reference upstream outputs
+  via `{{steps.N.output.path.to.field}}` in their config.
+- **Concurrent workers** — `FOR UPDATE SKIP LOCKED` prevents duplicate
+  execution when multiple worker replicas run against the same database.
+- **Multi-tenant isolation** — every resource is scoped to a project; all
+  queries filter by `project_id`.
+- **Event-driven triggers** *(optional)* — register event-type → workflow
+  mappings; the Kafka consumer triggers runs on matching integration events.
+- **Lifecycle events** *(optional)* — publish `workflow.run.started`,
+  `step.run.succeeded`, etc. to an external event store for audit/replay.
+- **Two binaries** — `cmd/api` serves HTTP and can embed the executor;
+  `cmd/worker` runs the executor only for independent horizontal scaling.
 
 ---
 
-## Architecture Highlights
+## Architecture Overview
 
-This project follows **Hexagonal Architecture (Ports & Adapters)**:
+```
+  Client
+    │ Bearer wf_prefix.secret
+    ▼
+┌──────────────────────────────────────────────────────────┐
+│                    API Server (cmd/api)                   │
+│  Auth Middleware → HTTP Handlers → WorkflowService        │
+│                                   Executor (goroutine)   │
+└──────────────────────────────────┬───────────────────────┘
+                                   │
+                          ┌────────▼─────────┐
+                          │    PostgreSQL     │
+                          │  projects         │
+                          │  api_keys         │
+                          │  workflows        │
+                          │  workflow_steps   │
+                          │  workflow_runs    │
+                          │  step_runs        │
+                          └────────▲─────────┘
+                                   │ poll (FOR UPDATE SKIP LOCKED)
+┌──────────────────────────────────┴───────────────────────┐
+│                  Worker (cmd/worker)  [optional]          │
+└──────────────────────────────────────────────────────────┘
+```
 
-* Domain layer isolated from infrastructure
-* PostgreSQL persistence adapter
-* HTTP adapter for API interface
-* Executor adapter for workflow processing
+The codebase follows **Hexagonal Architecture** (ports & adapters):
 
-### Key Design Principles:
+| Layer | Package | Responsibility |
+| --- | --- | --- |
+| Entrypoints | `cmd/api`, `cmd/worker` | Wiring, server lifecycle |
+| HTTP Adapter | `internal/interfaces/http` | Parse requests, render JSON |
+| Use Cases | `internal/app` | Business logic, validation |
+| Executor | `internal/app/executor` | Poll and execute step runs |
+| Domain | `internal/domain` | Core types, status enums |
+| DB Adapter | `internal/infrastructure/db` | SQL queries, repositories |
 
-* Domain-first modeling
-* Infrastructure independence
-* Atomic transactional writes
-* Explicit retry classification
-* Stateless worker scalability model
-
----
-
-## Tech Stack
-
-| Layer        | Technology             |
-| ------------ | ---------------------- |
-| Language     | Go 1.26                |
-| Database     | PostgreSQL             |
-| DB Driver    | pgx/v5                 |
-| Auth         | bcrypt API keys        |
-| HTTP         | net/http stdlib        |
-| API Docs     | Swagger (swaggo)       |
-| Architecture | Hexagonal Architecture |
-
----
-
-## Current Supported Step Types
-
-### 1. HTTP Request Step
-
-Supports:
-
-* method validation
-* custom headers
-* request body
-* timeout control
-* response parsing
-
-### 2. Delay Step
-
-Supports:
-
-* cancellable timed waits
-* delayed orchestration scheduling
-
----
-
-## Project Maturity
-
-### Current Level:
-
-Senior-level distributed systems MVP
-
-Implemented:
-
-* persistent workflow state machine
-* retry engine
-* workflow sequencing
-* output chaining
-* tenant isolation
-* distributed worker binary
-
----
-
-## Known Current Limitations
-
-Not yet implemented:
-
-* distributed row locking (`FOR UPDATE SKIP LOCKED`)
-* parallel step execution concurrency
-* saga compensation / rollback flows
-* conditional branching steps
-* structured logging / tracing
-* Prometheus metrics
-
-These are documented in roadmap as production-grade upgrades.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full execution flow,
+state machine diagram, and scaling model.
 
 ---
 
 ## Quick Start
 
-### 1. Install dependencies
+> Prerequisites: Go 1.21+, PostgreSQL 14+, `psql` on `$PATH`.
 
 ```bash
-go mod download
-```
+# 1. Clone
+git clone https://github.com/SheykoWk/workflow-engine.git
+cd workflow-engine
 
-### 2. Create database
-
-```bash
-psql -U postgres -h localhost -c 'CREATE DATABASE "workflow-engine";'
-```
-
-### 3. Configure environment
-
-```bash
+# 2. Configure
 cp .env.example .env
+# Edit .env and set DATABASE_URL
+
+# 3. Create database and run migrations
+make up       # starts postgres via docker compose (or use your own)
+make migrate
+
+# 4. Start the API server
+make run
+# → http://localhost:8080
+# → http://localhost:8080/swagger/index.html
 ```
 
-### 4. Run migrations
+In a second terminal, start the worker:
 
 ```bash
-./internal/infrastructure/db/migrate-up.sh
+make run-worker
 ```
 
-### 5. Start API server
+---
+
+## Running Locally
+
+### Prerequisites
+
+| Tool | Version | Purpose |
+| --- | --- | --- |
+| Go | 1.21+ | Build and run |
+| PostgreSQL | 14+ | State store |
+| Docker + Compose | Any | Spin up local postgres (optional) |
+
+### Step-by-step
+
+**1. Start PostgreSQL**
+
+Using the bundled compose file (recommended for local dev):
 
 ```bash
-go run ./cmd/api
+make up
 ```
 
-API available at:
+Or use an existing PostgreSQL instance and set `DATABASE_URL` in `.env`.
+
+**2. Apply migrations**
 
 ```bash
-http://localhost:8080
+make migrate
 ```
 
-Swagger UI:
+This runs all `.up.sql` files in `internal/infrastructure/db/migrations/`.
+
+**3. Start the API server**
 
 ```bash
-http://localhost:8080/swagger/index.html
+make run
 ```
 
----
-
-## Running Worker Process
-
-Start worker executor separately:
+**4. Create a project and get an API key**
 
 ```bash
-go run ./cmd/worker
+curl -s -X POST http://localhost:8080/projects \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"my-project"}' | jq .
 ```
 
-This process polls pending workflow steps and executes them independently.
+Response:
+
+```json
+{
+  "project": { "id": "...", "name": "my-project", "slug": "my-project-abc123" },
+  "api_key":  { "key": "wf_AbCdEfGhI.xYz..." }
+}
+```
+
+Save the `key` — it is shown only once.
+
+**5. Create a workflow**
+
+```bash
+export KEY="wf_AbCdEfGhI.xYz..."
+
+curl -s -X POST http://localhost:8080/workflows \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "hello-world",
+    "steps": [
+      {
+        "name": "wait-1s",
+        "type": "delay",
+        "config": { "seconds": 1 }
+      },
+      {
+        "name": "call-api",
+        "type": "http_request",
+        "config": {
+          "method": "GET",
+          "url": "https://httpbin.org/get",
+          "retry": { "max_attempts": 3, "backoff_seconds": 2 }
+        }
+      }
+    ]
+  }' | jq .
+```
+
+**6. Trigger a run**
+
+```bash
+export WF_ID="<id from above>"
+
+curl -s -X POST "http://localhost:8080/workflows/$WF_ID/runs" \
+  -H "Authorization: Bearer $KEY" | jq .
+```
+
+**7. Poll the run status**
+
+```bash
+export RUN_ID="<run_id from above>"
+
+curl -s "http://localhost:8080/workflows/runs/$RUN_ID" \
+  -H "Authorization: Bearer $KEY" | jq '.status, .stepRuns[].status'
+```
 
 ---
 
-## Environment Variables
+## Configuration
 
-| Variable     | Required | Default | Description                  |
-| ------------ | -------- | ------- | ---------------------------- |
-| DATABASE_URL | Yes      | —       | PostgreSQL connection string |
-| HTTP_ADDR    | No       | :8080   | HTTP listen address          |
-
----
-
-## Example Workflow Execution
-
-Example:
-
-1. Create workflow definition
-2. Trigger workflow run
-3. Worker picks pending steps
-4. Executes sequentially
-5. Retries failures automatically
-6. Marks workflow complete
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `DATABASE_URL` | **Yes** | — | PostgreSQL DSN. Format: `postgresql://user:pass@host:port/db?sslmode=disable` |
+| `HTTP_ADDR` | No | `:8080` | TCP address the API server listens on |
+| `ENABLE_SWAGGER` | No | `false` | Mount Swagger UI at `/swagger/` |
+| `ALLOWED_ORIGINS` | No | `""` | Comma-separated CORS allowed origins |
+| `EVENT_STREAMING_BASE_URL` | No | — | Base URL of the Atlas Event Streaming API. When set, lifecycle events are published. |
+| `EVENT_STREAMING_API_TOKEN` | No | — | API token for the event streaming service |
+| `KAFKA_BROKERS` | No | — | Comma-separated Kafka broker addresses. Required for event-driven triggers. |
+| `KAFKA_EVENTS_TOPIC` | No | — | Kafka topic for integration events |
+| `KAFKA_CONSUMER_GROUP` | No | `workflow-engine` | Kafka consumer group ID |
+| `DEMO_MODE` | No | `false` | Pre-seed a fixed project and API key (dev/demo only) |
+| `DEMO_API_KEY` | No | — | API key for the demo project |
+| `DEMO_PROJECT_ID` | No | — | Fixed UUID for the demo project |
 
 ---
 
-## Example Use Cases
+## API Reference
 
-This engine is ideal for:
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `GET` | `/health` | No | Liveness probe |
+| `POST` | `/projects` | No | Create project + return default API key |
+| `GET` | `/projects` | Yes | Get authenticated project |
+| `POST` | `/workflows` | Yes | Create workflow definition with steps |
+| `GET` | `/workflows` | Yes | List workflow definitions |
+| `POST` | `/workflows/{id}/runs` | Yes | Trigger a workflow run |
+| `GET` | `/workflows/runs` | Yes | List all runs for the project |
+| `GET` | `/workflows/runs/{id}` | Yes | Get run detail with per-step timeline |
+| `GET` | `/swagger/*` | No | Interactive Swagger UI |
 
-* SaaS tenant provisioning
-* payment retry orchestration
-* background integration pipelines
-* async approval workflows
-* compliance automation processes
+Full OpenAPI spec: [docs/swagger.yaml](docs/swagger.yaml)
 
----
+### Step Types
 
-## Documentation
+**`delay`** — pause execution for N seconds.
 
-| Document                             | Description                               |
-| ------------------------------------ | ----------------------------------------- |
-| [Architecture](docs/ARCHITECTURE.md) | Internal architecture and execution model |
-| [Usage & API](docs/USAGE.md)         | Endpoints and examples                    |
-| [Contributing](docs/CONTRIBUTING.md) | How to extend the engine                  |
-| [Post-MVP Roadmap](docs/POST_MVP.md) | Planned production-grade enhancements     |
+```json
+{ "seconds": 10 }
+```
 
----
+**`http_request`** — make an HTTP call; supports output chaining.
 
-## Roadmap to Production Grade
+```json
+{
+  "method": "POST",
+  "url": "https://api.example.com/webhook",
+  "headers": { "X-API-Key": "secret" },
+  "body": { "user_id": "{{steps.0.output.body.id}}" },
+  "retry": { "max_attempts": 3, "backoff_seconds": 5 }
+}
+```
 
-Next major upgrades:
-
-### Critical
-
-* Add `SELECT FOR UPDATE SKIP LOCKED`
-* Prevent multi-worker race conditions
-
-### Scalability
-
-* Parallel executor concurrency
-* Worker pool scheduling
-
-### Observability
-
-* Structured logging (slog)
-* Prometheus metrics
-* OpenTelemetry tracing
-
-### Workflow Features
-
-* Conditional branching
-* Saga compensation handlers
-* Script execution steps
+The response is captured as `{ "status_code": 200, "body": ... }` and
+available to downstream steps via `{{steps.N.output.status_code}}` or
+`{{steps.N.output.body.<field>}}`.
 
 ---
 
-## Engineering Highlights
+## Development
 
-This project demonstrates:
+```bash
+make build        # compile both binaries to ./bin/
+make test         # go test ./...
+make test-race    # test with race detector
+make vet          # go vet ./...
+make lint         # golangci-lint (install: brew install golangci-lint)
+make tidy         # go mod tidy
+make swagger      # regenerate OpenAPI spec
+make help         # list all targets
+```
 
-* distributed systems orchestration design
-* persistent workflow state machines
-* retry semantics engineering
-* idempotent execution guarantees
-* scalable worker separation patterns
+### Adding a New Step Type
 
----
-
-## Why This Project Matters
-
-This is not a CRUD application.
-
-It is infrastructure software:
-a reusable orchestration engine solving a real distributed systems problem.
-
-It demonstrates senior-level backend engineering in:
-
-* systems design
-* fault tolerance
-* execution reliability
-* architectural separation
+1. Add a case in `executeStep` — `internal/app/executor/executor.go`.
+2. Implement `run<Type>` in a new file `internal/app/executor/<type>.go`.
+3. Update the `type` enum in Swagger annotations on `CreateWorkflowStepRequest`.
+4. Add tests.
 
 ---
 
-## Author
+## Roadmap
 
-Built as a distributed systems engineering project focused on resilient orchestration patterns in modern backend architectures.
+- [ ] `SELECT FOR UPDATE` with advisory lock for very high-concurrency scenarios
+- [ ] Parallel step execution within a single run
+- [ ] Conditional branching step type (`condition`)
+- [ ] Script execution step type (`script`)
+- [ ] Saga / compensation handlers for rollback flows
+- [ ] Prometheus metrics (`/metrics`)
+- [ ] OpenTelemetry distributed tracing
+- [ ] Rate limiting on the HTTP API
+- [ ] Unit and integration test suite
 
-Sahid Kick  
-Senior Backend Engineer
+See [CHANGELOG.md](CHANGELOG.md) for what is already implemented.
 
-GitHub: https://github.com/SheykoWk
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the security model and how to report
+vulnerabilities.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
