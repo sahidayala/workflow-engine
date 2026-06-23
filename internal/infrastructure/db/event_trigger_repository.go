@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db/models"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/infrastructure/db/models"
 )
 
 // ErrEventTriggerNotFound is returned when no trigger matches the query.

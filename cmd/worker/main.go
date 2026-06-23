@@ -9,10 +9,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/SheykoWk/workflow-engine/internal/app/executor"
-	"github.com/SheykoWk/workflow-engine/internal/app/ports"
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/eventstore"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/app/executor"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/app/ports"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/infrastructure/db"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/infrastructure/eventstore"
 	"github.com/joho/godotenv"
 )
 

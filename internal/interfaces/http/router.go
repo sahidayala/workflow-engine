@@ -7,8 +7,8 @@ import (
 
 	httpSwagger "github.com/swaggo/http-swagger"
 
-	"github.com/SheykoWk/workflow-engine/internal/auth"
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/auth"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/infrastructure/db"
 )
 
 // NewRouter returns the HTTP handler tree for the API. It uses net/http only

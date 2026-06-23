@@ -31,8 +31,8 @@ import (
 
 	kafkago "github.com/segmentio/kafka-go"
 
-	"github.com/SheykoWk/workflow-engine/internal/domain"
-	wftrace "github.com/SheykoWk/workflow-engine/internal/pkg/trace"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/domain"
+	wftrace "github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/pkg/trace"
 )
 
 // maxHandlerRetries is the number of in-memory retry attempts before a message

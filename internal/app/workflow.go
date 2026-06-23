@@ -10,8 +10,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db/models"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/infrastructure/db"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/infrastructure/db/models"
 )
 
 // ValidationError is returned for bad input (maps to HTTP 400).

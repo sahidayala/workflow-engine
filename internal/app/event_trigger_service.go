@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/SheykoWk/workflow-engine/internal/domain"
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/domain"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/infrastructure/db"
 )
 
 // EventTriggerService handles integration events from the platform event backbone

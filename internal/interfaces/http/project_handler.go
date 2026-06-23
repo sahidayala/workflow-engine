@@ -10,8 +10,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/SheykoWk/workflow-engine/internal/auth"
-	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/auth"
+	"github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine/internal/infrastructure/db"
 )
 
 const maxCreateProjectBody = 1 << 20 // 1 MiB

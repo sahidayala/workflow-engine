@@ -1,4 +1,4 @@
-module github.com/SheykoWk/workflow-engine
+module github.com/SahidAyala/Nocturn-Atlas-Workflow-Engine
 
 go 1.25.0
 
