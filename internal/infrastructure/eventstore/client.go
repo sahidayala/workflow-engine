@@ -103,7 +103,7 @@ func (c *HTTPClient) Publish(ctx context.Context, event ports.WorkflowEvent) err
 		return fmt.Errorf("eventstore: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiToken)
+	req.Header.Set("X-API-Key", c.apiToken)
 	if event.CorrelationID != "" {
 		req.Header.Set("X-Correlation-ID", event.CorrelationID)
 	}
