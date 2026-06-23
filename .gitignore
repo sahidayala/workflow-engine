@@ -1,3 +1,21 @@
-/bin
-/vendor
+# Build artifacts
+/bin/
+/vendor/
+/api
+/worker
+
+# Environment — never commit secrets
 .env
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test output
+coverage.out
+coverage.html

@@ -1,0 +1,32 @@
+# Standalone development compose file for the workflow-engine.
+# Starts only PostgreSQL so you can run the API and worker directly with `go run`.
+#
+# Usage:
+#   make up         # start postgres
+#   make migrate    # apply SQL migrations
+#   make run        # start API server
+#   make run-worker # start worker in a second terminal
+#   make down       # tear down
+
+name: workflow-engine-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: workflow-engine
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d workflow-engine"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres-dev-data:
