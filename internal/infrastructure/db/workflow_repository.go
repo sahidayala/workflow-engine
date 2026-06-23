@@ -3,8 +3,10 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db/models"
 )
@@ -170,4 +172,149 @@ func (r *WorkflowRepository) CreateWorkflowRunWithStepRuns(ctx context.Context, 
 		return "", 0, fmt.Errorf("workflow_repository: commit run: %w", err)
 	}
 	return runID, stepCount, nil
+}
+
+// RunListItem is a workflow_run row joined with its workflow name.
+type RunListItem struct {
+	ID            string
+	WorkflowID    string
+	WorkflowName  string
+	Status        string
+	Input         json.RawMessage
+	Output        *json.RawMessage
+	ErrorMessage  *string
+	CorrelationID *string
+	CreatedAt     time.Time
+	StartedAt     *time.Time
+	CompletedAt   *time.Time
+}
+
+// StepRunDetail is a step_run row joined with its step definition.
+type StepRunDetail struct {
+	ID             string
+	WorkflowRunID  string
+	WorkflowStepID string
+	StepName       string
+	StepType       string
+	StepIndex      int
+	Attempt        int
+	Status         string
+	Input          json.RawMessage
+	Output         *json.RawMessage
+	ErrorMessage   *string
+	CreatedAt      time.Time
+	StartedAt      *time.Time
+	CompletedAt    *time.Time
+}
+
+// RunDetail is a RunListItem with its step runs.
+type RunDetail struct {
+	RunListItem
+	StepRuns []StepRunDetail
+}
+
+// ListRunsByProjectID returns the most recent 100 runs for a project, newest first.
+func (r *WorkflowRepository) ListRunsByProjectID(ctx context.Context, projectID string) ([]RunListItem, error) {
+	const q = `
+		SELECT
+			wr.id, wr.workflow_id, w.name,
+			wr.status::text,
+			wr.input, wr.output, wr.error_message, wr.correlation_id,
+			wr.created_at, wr.started_at, wr.completed_at
+		FROM workflow_runs wr
+		JOIN workflows w ON w.id = wr.workflow_id
+		WHERE w.project_id = $1
+		ORDER BY wr.created_at DESC
+		LIMIT 100
+	`
+	rows, err := r.db.QueryContext(ctx, q, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("workflow_repository: list runs: %w", err)
+	}
+	defer rows.Close()
+
+	var list []RunListItem
+	for rows.Next() {
+		var item RunListItem
+		if err := rows.Scan(
+			&item.ID, &item.WorkflowID, &item.WorkflowName,
+			&item.Status,
+			&item.Input, &item.Output, &item.ErrorMessage, &item.CorrelationID,
+			&item.CreatedAt, &item.StartedAt, &item.CompletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("workflow_repository: scan run: %w", err)
+		}
+		list = append(list, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("workflow_repository: iterate runs: %w", err)
+	}
+	return list, nil
+}
+
+// ErrRunNotFound means the run id is missing or not visible to this project.
+var ErrRunNotFound = errors.New("workflow_repository: run not found")
+
+// GetRunWithSteps returns a single run with all its step runs, verifying project ownership.
+func (r *WorkflowRepository) GetRunWithSteps(ctx context.Context, projectID, runID string) (*RunDetail, error) {
+	const runQ = `
+		SELECT
+			wr.id, wr.workflow_id, w.name,
+			wr.status::text,
+			wr.input, wr.output, wr.error_message, wr.correlation_id,
+			wr.created_at, wr.started_at, wr.completed_at
+		FROM workflow_runs wr
+		JOIN workflows w ON w.id = wr.workflow_id
+		WHERE wr.id = $1 AND w.project_id = $2
+	`
+	var detail RunDetail
+	row := r.db.QueryRowContext(ctx, runQ, runID, projectID)
+	err := row.Scan(
+		&detail.ID, &detail.WorkflowID, &detail.WorkflowName,
+		&detail.Status,
+		&detail.Input, &detail.Output, &detail.ErrorMessage, &detail.CorrelationID,
+		&detail.CreatedAt, &detail.StartedAt, &detail.CompletedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrRunNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("workflow_repository: get run: %w", err)
+	}
+
+	const stepsQ = `
+		SELECT
+			sr.id, sr.workflow_run_id, sr.workflow_step_id,
+			ws.name, ws.step_type, ws.step_index,
+			sr.attempt, sr.status::text,
+			sr.input, sr.output, sr.error_message,
+			sr.created_at, sr.started_at, sr.completed_at
+		FROM step_runs sr
+		JOIN workflow_steps ws ON ws.id = sr.workflow_step_id
+		WHERE sr.workflow_run_id = $1
+		ORDER BY ws.step_index ASC, sr.attempt ASC
+	`
+	srows, err := r.db.QueryContext(ctx, stepsQ, runID)
+	if err != nil {
+		return nil, fmt.Errorf("workflow_repository: list step runs: %w", err)
+	}
+	defer srows.Close()
+
+	for srows.Next() {
+		var sr StepRunDetail
+		if err := srows.Scan(
+			&sr.ID, &sr.WorkflowRunID, &sr.WorkflowStepID,
+			&sr.StepName, &sr.StepType, &sr.StepIndex,
+			&sr.Attempt, &sr.Status,
+			&sr.Input, &sr.Output, &sr.ErrorMessage,
+			&sr.CreatedAt, &sr.StartedAt, &sr.CompletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("workflow_repository: scan step run: %w", err)
+		}
+		detail.StepRuns = append(detail.StepRuns, sr)
+	}
+	if err := srows.Err(); err != nil {
+		return nil, fmt.Errorf("workflow_repository: iterate step runs: %w", err)
+	}
+	return &detail, nil
 }

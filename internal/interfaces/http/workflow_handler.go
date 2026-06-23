@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/SheykoWk/workflow-engine/internal/app"
 	"github.com/SheykoWk/workflow-engine/internal/auth"
@@ -191,4 +192,156 @@ func (h *WorkflowHandler) GetAllWorkflows(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, workflows)
+}
+
+// workflowRunResponse is the JSON shape for a single workflow run (matches UI WorkflowRun type).
+type workflowRunResponse struct {
+	ID            string            `json:"id"`
+	WorkflowID    string            `json:"workflowId"`
+	WorkflowName  string            `json:"workflowName"`
+	Status        string            `json:"status"`
+	Input         json.RawMessage   `json:"input,omitempty"`
+	Output        *json.RawMessage  `json:"output,omitempty"`
+	ErrorMessage  *string           `json:"errorMessage,omitempty"`
+	CorrelationID *string           `json:"correlationId,omitempty"`
+	CreatedAt     string            `json:"createdAt"`
+	StartedAt     *string           `json:"startedAt,omitempty"`
+	CompletedAt   *string           `json:"completedAt,omitempty"`
+	DurationMs    *int64            `json:"durationMs,omitempty"`
+	StepRuns      []stepRunResponse `json:"stepRuns"`
+}
+
+// stepRunResponse is the JSON shape for a step run (matches UI StepRun type).
+type stepRunResponse struct {
+	ID             string           `json:"id"`
+	WorkflowRunID  string           `json:"workflowRunId"`
+	WorkflowStepID string           `json:"workflowStepId"`
+	StepName       string           `json:"stepName"`
+	StepType       string           `json:"stepType"`
+	StepIndex      int              `json:"stepIndex"`
+	Attempt        int              `json:"attempt"`
+	Status         string           `json:"status"`
+	Input          json.RawMessage  `json:"input,omitempty"`
+	Output         *json.RawMessage `json:"output,omitempty"`
+	ErrorMessage   *string          `json:"errorMessage,omitempty"`
+	CreatedAt      string           `json:"createdAt"`
+	StartedAt      *string          `json:"startedAt,omitempty"`
+	CompletedAt    *string          `json:"completedAt,omitempty"`
+	DurationMs     *int64           `json:"durationMs,omitempty"`
+}
+
+// listRunsResponse matches the UI ApiListResponse<WorkflowRun> shape.
+type listRunsResponse struct {
+	Items []workflowRunResponse `json:"items"`
+	Total int                   `json:"total"`
+	Page  int                   `json:"page"`
+	Limit int                   `json:"limit"`
+}
+
+func mapRunToResponse(item db.RunListItem) workflowRunResponse {
+	r := workflowRunResponse{
+		ID:            item.ID,
+		WorkflowID:    item.WorkflowID,
+		WorkflowName:  item.WorkflowName,
+		Status:        item.Status,
+		Input:         item.Input,
+		Output:        item.Output,
+		ErrorMessage:  item.ErrorMessage,
+		CorrelationID: item.CorrelationID,
+		CreatedAt:     item.CreatedAt.Format(time.RFC3339),
+		StepRuns:      []stepRunResponse{},
+	}
+	if item.StartedAt != nil {
+		s := item.StartedAt.Format(time.RFC3339)
+		r.StartedAt = &s
+	}
+	if item.CompletedAt != nil {
+		s := item.CompletedAt.Format(time.RFC3339)
+		r.CompletedAt = &s
+		if item.StartedAt != nil {
+			ms := item.CompletedAt.Sub(*item.StartedAt).Milliseconds()
+			r.DurationMs = &ms
+		}
+	}
+	return r
+}
+
+func mapStepRunToResponse(sr db.StepRunDetail) stepRunResponse {
+	s := stepRunResponse{
+		ID:             sr.ID,
+		WorkflowRunID:  sr.WorkflowRunID,
+		WorkflowStepID: sr.WorkflowStepID,
+		StepName:       sr.StepName,
+		StepType:       sr.StepType,
+		StepIndex:      sr.StepIndex,
+		Attempt:        sr.Attempt,
+		Status:         sr.Status,
+		Input:          sr.Input,
+		Output:         sr.Output,
+		ErrorMessage:   sr.ErrorMessage,
+		CreatedAt:      sr.CreatedAt.Format(time.RFC3339),
+	}
+	if sr.StartedAt != nil {
+		t := sr.StartedAt.Format(time.RFC3339)
+		s.StartedAt = &t
+	}
+	if sr.CompletedAt != nil {
+		t := sr.CompletedAt.Format(time.RFC3339)
+		s.CompletedAt = &t
+		if sr.StartedAt != nil {
+			ms := sr.CompletedAt.Sub(*sr.StartedAt).Milliseconds()
+			s.DurationMs = &ms
+		}
+	}
+	return s
+}
+
+// ListAllRuns handles GET /workflows/runs: list all runs for the authenticated project.
+func (h *WorkflowHandler) ListAllRuns(w http.ResponseWriter, r *http.Request) {
+	projectID, ok := auth.ProjectIDFromContext(r.Context())
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	items, err := h.svc.ListRunsByProject(r.Context(), projectID)
+	if err != nil {
+		log.Printf("workflows: list runs: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	resp := make([]workflowRunResponse, 0, len(items))
+	for _, item := range items {
+		resp = append(resp, mapRunToResponse(item))
+	}
+	writeJSON(w, http.StatusOK, listRunsResponse{Items: resp, Total: len(resp), Page: 1, Limit: 100})
+}
+
+// GetRun handles GET /workflows/runs/{id}: get a single run with step detail.
+func (h *WorkflowHandler) GetRun(w http.ResponseWriter, r *http.Request) {
+	projectID, ok := auth.ProjectIDFromContext(r.Context())
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	runID := strings.TrimSpace(r.PathValue("id"))
+	if runID == "" {
+		writeJSONError(w, http.StatusBadRequest, "run id is required")
+		return
+	}
+	detail, err := h.svc.GetRunDetail(r.Context(), projectID, runID)
+	if err != nil {
+		if errors.Is(err, db.ErrRunNotFound) {
+			writeJSONError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		log.Printf("workflows: get run: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	resp := mapRunToResponse(detail.RunListItem)
+	resp.StepRuns = make([]stepRunResponse, 0, len(detail.StepRuns))
+	for _, sr := range detail.StepRuns {
+		resp.StepRuns = append(resp.StepRuns, mapStepRunToResponse(sr))
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

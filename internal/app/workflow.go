@@ -178,6 +178,16 @@ func slugFromName(name string) string {
 	return s
 }
 
+// ListRunsByProject returns all runs for a project.
+func (s *WorkflowService) ListRunsByProject(ctx context.Context, projectID string) ([]db.RunListItem, error) {
+	return s.repo.ListRunsByProjectID(ctx, projectID)
+}
+
+// GetRunDetail returns a single run with its step runs.
+func (s *WorkflowService) GetRunDetail(ctx context.Context, projectID, runID string) (*db.RunDetail, error) {
+	return s.repo.GetRunWithSteps(ctx, projectID, runID)
+}
+
 // AsValidation returns (msg, true) if err is or wraps ValidationError.
 func AsValidation(err error) (string, bool) {
 	var v *ValidationError
