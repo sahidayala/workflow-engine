@@ -1,9 +1,11 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"errors"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/SheykoWk/workflow-engine/internal/infrastructure/db"
 )
@@ -11,8 +13,21 @@ import (
 // APIKeyMiddleware returns middleware that validates Authorization: Bearer wf_...,
 // loads the key row by prefix, verifies bcrypt, and sets project ID on the request context.
 func APIKeyMiddleware(keys *db.APIKeyRepository) func(http.Handler) http.Handler {
+	demoMode := os.Getenv("DEMO_MODE") == "true"
+	demoKey := os.Getenv("DEMO_API_KEY")
+	demoProjectID := os.Getenv("DEMO_PROJECT_ID")
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Demo bypass: only active when DEMO_MODE=true is explicitly set.
+			// Never runs in production — omitting DEMO_MODE disables this path entirely.
+			if demoMode && demoKey != "" && demoProjectID != "" {
+				if raw, ok := ParseBearerAPIKey(r.Header.Get("Authorization")); ok &&
+					subtle.ConstantTimeCompare([]byte(raw), []byte(demoKey)) == 1 {
+					next.ServeHTTP(w, r.WithContext(WithProjectID(r.Context(), demoProjectID)))
+					return
+				}
+			}
+
 			raw, ok := ParseBearerAPIKey(r.Header.Get("Authorization"))
 			if !ok {
 				writeAuthJSON(w, http.StatusUnauthorized, `{"error":"missing or invalid authorization"}`)
